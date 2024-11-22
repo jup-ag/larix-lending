@@ -1,7 +1,8 @@
 use super::*;
-use crate::{
-    math::{Decimal, Rate},
-};
+use crate::error::LendingError;
+use crate::math::{Decimal, Rate};
+use crate::state::last_update::LastUpdate;
+use anchor_lang::AnchorDeserialize;
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
 use solana_program::{
     clock::Slot,
@@ -10,45 +11,41 @@ use solana_program::{
     program_pack::{IsInitialized, Pack, Sealed},
     pubkey::{Pubkey, PUBKEY_BYTES},
 };
-use std::{
-    convert::{TryFrom},
-};
-use crate::state::last_update::LastUpdate;
+use std::convert::TryFrom;
 
-pub mod init_reserve_accounts_index{
+pub mod init_reserve_accounts_index {
     ///   0. `[writable]` Reserve account - uninitialized.
-    pub const RESERVE_ACCOUNT:usize = 0 as usize;
+    pub const RESERVE_ACCOUNT: usize = 0 as usize;
     ///   1. `[]` Reserve liquidity SPL Token mint.
-    pub const LIQUIDITY_MINT:usize = 1 as usize;
+    pub const LIQUIDITY_MINT: usize = 1 as usize;
     ///   2. `[]` Reserve liquidity supply SPL Token account.
-    pub const LIQUIDITY_SUPPLY:usize = 2 as usize;
+    pub const LIQUIDITY_SUPPLY: usize = 2 as usize;
     ///   3. `[]` Reserve liquidity fee receiver.
-    pub const LIQUIDITY_FEE_RECEIVER:usize = 3 as usize;
+    pub const LIQUIDITY_FEE_RECEIVER: usize = 3 as usize;
     ///   4. `[]` Pyth product account.
-    pub const PYTH_PRODUCT:usize = 4 as usize;
+    pub const PYTH_PRODUCT: usize = 4 as usize;
     ///   5. `[]` Pyth price account.
     ///             This will be used as the reserve liquidity oracle account.
-    pub const PYTH_PRICE:usize = 5 as usize;
+    pub const PYTH_PRICE: usize = 5 as usize;
     ///   6  '[]' Larix oracle id
-    pub const LARIX_ORACLE:usize = 6 as usize;
+    pub const LARIX_ORACLE: usize = 6 as usize;
     ///   7. `[]` Reserve collateral SPL Token mint.
-    pub const COLLATERAL_MINT:usize = 7 as usize;
+    pub const COLLATERAL_MINT: usize = 7 as usize;
     ///   8. `[]` Reserve collateral token supply.
-    pub const COLLATERAL_SUPPLY:usize = 8 as usize;
+    pub const COLLATERAL_SUPPLY: usize = 8 as usize;
     ///   9  `[]` Lending market account.
-    pub const LENDING_MARKET:usize = 9 as usize;
+    pub const LENDING_MARKET: usize = 9 as usize;
     ///   10  `[signer]` Lending market owner.
-    pub const LENDING_MARKET_OWNER:usize = 10 as usize;
+    pub const LENDING_MARKET_OWNER: usize = 10 as usize;
     ///   11. `[]` Un_coll_supply_account
-    pub const UN_COLL_SUPPLY:usize = 11 as usize;
+    pub const UN_COLL_SUPPLY: usize = 11 as usize;
     ///   12  `[]` Clock sysvar.
-    pub const CLOCK_SYSVAR:usize = 12 as usize;
+    pub const CLOCK_SYSVAR: usize = 12 as usize;
     ///   13 `[]` Rent sysvar.
-    pub const RENT_SYSVAR:usize = 13 as usize;
+    pub const RENT_SYSVAR: usize = 13 as usize;
     ///   14 `[]` Token program id.
-    pub const TOKEN_PROGRAM_ID:usize = 14 as usize;
+    pub const TOKEN_PROGRAM_ID: usize = 14 as usize;
 }
-
 
 /// Percentage of an obligation that can be repaid during each liquidation call
 pub const LIQUIDATION_CLOSE_FACTOR: u8 = 50;
@@ -75,10 +72,8 @@ pub struct Reserve {
     /// Bonus (used for storing mining-info of a reserve)
     pub bonus: Bonus,
     /// Entry lock
-    pub reentry_lock: bool
-
+    pub reentry_lock: bool,
 }
-
 
 /// Calculate borrow result
 #[derive(Debug)]
@@ -118,7 +113,7 @@ pub struct CalculateLiquidationResult {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReserveLiquidity {
     /// Is the mint address a lp
-    pub is_lp:bool,
+    pub is_lp: bool,
     /// Reserve liquidity mint address
     pub mint_pubkey: Pubkey,
     /// Reserve liquidity mint decimals
@@ -144,14 +139,13 @@ pub struct ReserveLiquidity {
     /// Reserve liquidity market price in quote currency
     pub market_price: Decimal,
     /// unclaimed fee by reserve owner
-    pub owner_unclaimed: Decimal
+    pub owner_unclaimed: Decimal,
 }
-
 
 /// Create a new reserve liquidity
 pub struct NewReserveLiquidityParams {
     /// Is the mint address a lp
-    pub is_lp:bool,
+    pub is_lp: bool,
     /// Reserve liquidity mint address
     pub mint_pubkey: Pubkey,
     /// Reserve liquidity mint decimals
@@ -183,7 +177,6 @@ pub struct ReserveCollateral {
     pub supply_pubkey: Pubkey,
 }
 
-
 /// Create a new reserve collateral
 pub struct NewReserveCollateralParams {
     /// Reserve collateral mint address
@@ -201,7 +194,7 @@ impl From<CollateralExchangeRate> for Rate {
         exchange_rate.0
     }
 }
-#[derive(Clone, Debug, Default, PartialEq,Copy)]
+#[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct Bonus {
     /// Supply address of un-collaterized LToken
     pub un_coll_supply_account: Pubkey,
@@ -223,11 +216,11 @@ pub struct InitBonusParams {
 
 impl Bonus {
     pub fn new(params: InitBonusParams) -> Self {
-        Self{
-            un_coll_supply_account:params.un_coll_supply_account,
-            l_token_mining_index : Decimal::zero(),
-            borrow_mining_index : Decimal::zero(),
-            total_mining_speed : params.total_mining_speed,
+        Self {
+            un_coll_supply_account: params.un_coll_supply_account,
+            l_token_mining_index: Decimal::zero(),
+            borrow_mining_index: Decimal::zero(),
+            total_mining_speed: params.total_mining_speed,
             supply_rate: params.supply_rate,
         }
     }
@@ -270,13 +263,13 @@ pub struct ReserveConfig {
     /// Program owner fees assessed, separate from gains due to interest accrual
     pub fees: ReserveFees,
     /// If deposit paused
-    pub deposit_paused:bool,
+    pub deposit_paused: bool,
     /// If borrow paused
-    pub borrow_paused:bool,
+    pub borrow_paused: bool,
     /// Id liquidation paused
-    pub liquidation_paused:bool,
+    pub liquidation_paused: bool,
     /// Deposit limit
-    pub deposit_limit:u64,
+    pub deposit_limit: u64,
 }
 
 /// Additional fee information on a reserve
@@ -300,7 +293,7 @@ pub struct ReserveFees {
     /// Amount of fee going to host account, if provided in liquidate and repay
     pub host_fee_percentage: u8,
     /// Host fee receiver register
-    pub host_fee_receivers:Vec<Pubkey>,
+    pub host_fee_receivers: Vec<Pubkey>,
 }
 /// Calculate fees exlusive or inclusive of an amount
 pub enum FeeCalculation {
@@ -317,7 +310,7 @@ impl IsInitialized for Reserve {
     }
 }
 
-const RESERVE_LEN: usize = 713 + PUBKEY_BYTES * HOST_FEE_RECEIVER_COUNT;//574; // 1 + 8 + 1 + 32 + 32 + 1 + 32 + 32 + 32 + 8 + 16 + 16 + 16 + 32 + 8 + 32 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 8 + 8 + 1 + 1 +1 +1 +1 248
+const RESERVE_LEN: usize = 713 + PUBKEY_BYTES * HOST_FEE_RECEIVER_COUNT; //574; // 1 + 8 + 1 + 32 + 32 + 1 + 32 + 32 + 32 + 8 + 16 + 16 + 16 + 32 + 8 + 32 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 8 + 8 + 1 + 1 +1 +1 +1 248
 
 impl Pack for Reserve {
     const LEN: usize = RESERVE_LEN;
@@ -330,39 +323,31 @@ impl Pack for Reserve {
             version,
             last_update_slot,
             last_update_stale,
-
             lending_market,
             liquidity_mint_pubkey,
             liquidity_mint_decimals,
-
             liquidity_supply_pubkey,
             liquidity_fee_receiver,
             liquidity_use_pyth_oracle,
             liquidity_pyth_oracle_pubkey,
             liquidity_larix_oracle_pubkey,
-
             liquidity_available_amount,
             liquidity_borrowed_amount_wads,
             liquidity_cumulative_borrow_rate_wads,
-
             liquidity_market_price,
             owner_unclaimed,
             collateral_mint_pubkey,
             collateral_mint_total_supply,
-
             collateral_supply_pubkey,
             config_optimal_utilization_rate,
             config_loan_to_value_ratio,
-
             config_liquidation_bonus,
             config_liquidation_threshold,
             config_min_borrow_rate,
-
             config_optimal_borrow_rate,
             config_max_borrow_rate,
             config_fees_borrow_fee_wad,
             config_fees_reserve_owner_fee_wad,
-
             config_fees_flash_loan_fee_wad,
             config_fees_host_fee_percentage,
             config_fees_host_fee_receiver_count,
@@ -370,11 +355,9 @@ impl Pack for Reserve {
             deposit_paused,
             borrow_paused,
             liquidation_paused,
-
             un_coll_supply_account,
             l_token_mining_index,
             borrow_mining_index,
-
             total_mining_speed,
             supply_rate,
             reentry_lock,
@@ -383,49 +366,46 @@ impl Pack for Reserve {
             _padding,
         ) = mut_array_refs![
             output,
-            1,//1
-            8,//9
-            1,//10
-            PUBKEY_BYTES,//42
-            PUBKEY_BYTES,//74
-            1,//75
-            PUBKEY_BYTES,//107
-            PUBKEY_BYTES,//139
+            1,            //1
+            8,            //9
+            1,            //10
+            PUBKEY_BYTES, //42
+            PUBKEY_BYTES, //74
+            1,            //75
+            PUBKEY_BYTES, //107
+            PUBKEY_BYTES, //139
             1,
-            PUBKEY_BYTES,//171
+            PUBKEY_BYTES, //171
             PUBKEY_BYTES,
-            8,//179
-            16,//195
-            16,//211
-            16,//227
+            8,  //179
+            16, //195
+            16, //211
+            16, //227
             16,
-            PUBKEY_BYTES,//259
-            8,//268
-            PUBKEY_BYTES,//300
-            1,//301
-            1,//302
-            1,//303
-            1,//304
-            1,//305
-            1,//306
-            1,//307
-
-            8,//315
+            PUBKEY_BYTES, //259
+            8,            //268
+            PUBKEY_BYTES, //300
+            1,            //301
+            1,            //302
+            1,            //303
+            1,            //304
+            1,            //305
+            1,            //306
+            1,            //307
+            8,            //315
             8,
-
-            8,//323
-
-            1,//324
-            1,//
+            8, //323
+            1, //324
+            1, //
             PUBKEY_BYTES * HOST_FEE_RECEIVER_COUNT,
-            1,//325
-            1,//326
-            1,//327
-            PUBKEY_BYTES,//359
-            16,//375
-            16,//391
-            8,//491
-            8,//499
+            1,            //325
+            1,            //326
+            1,            //327
+            PUBKEY_BYTES, //359
+            16,           //375
+            16,           //391
+            8,            //491
+            8,            //499
             1,
             8,
             1,
@@ -456,7 +436,7 @@ impl Pack for Reserve {
             liquidity_cumulative_borrow_rate_wads,
         );
         pack_decimal(self.liquidity.market_price, liquidity_market_price);
-        pack_bool(self.liquidity.is_lp,is_lp);
+        pack_bool(self.liquidity.is_lp, is_lp);
         // collateral
         collateral_mint_pubkey.copy_from_slice(self.collateral.mint_pubkey.as_ref());
         *collateral_mint_total_supply = self.collateral.mint_total_supply.to_le_bytes();
@@ -474,11 +454,15 @@ impl Pack for Reserve {
         *config_fees_reserve_owner_fee_wad = self.config.fees.reserve_owner_fee_wad.to_le_bytes();
         *config_fees_flash_loan_fee_wad = self.config.fees.flash_loan_fee_wad.to_le_bytes();
         *config_fees_host_fee_percentage = self.config.fees.host_fee_percentage.to_le_bytes();
-        *config_fees_host_fee_receiver_count = u8::try_from(self.config.fees.host_fee_receivers.len()).unwrap().to_le_bytes();
+        *config_fees_host_fee_receiver_count =
+            u8::try_from(self.config.fees.host_fee_receivers.len())
+                .unwrap()
+                .to_le_bytes();
 
         let mut offset = 0;
         for host_fee_receiver in &self.config.fees.host_fee_receivers {
-            let host_fee_receiver_id = array_mut_ref![config_fees_host_fee_receivers, offset,PUBKEY_BYTES];
+            let host_fee_receiver_id =
+                array_mut_ref![config_fees_host_fee_receivers, offset, PUBKEY_BYTES];
             host_fee_receiver_id.copy_from_slice(host_fee_receiver.as_ref());
             offset += PUBKEY_BYTES;
         }
@@ -579,7 +563,7 @@ impl Pack for Reserve {
             8,
             8,
             1,
-            1,//
+            1, //
             PUBKEY_BYTES * HOST_FEE_RECEIVER_COUNT,
             1,
             1,
@@ -603,9 +587,13 @@ impl Pack for Reserve {
         let host_fee_receiver_count = u8::from_le_bytes(*config_fees_host_fee_receiver_count);
         let mut host_fee_receivers = Vec::with_capacity(host_fee_receiver_count as usize + 1);
         let offset = 0;
-        for _ in 0..host_fee_receiver_count{
-            let host_fee_receiver = array_ref![config_fees_host_fee_receivers, offset, PUBKEY_BYTES];
-            host_fee_receivers.push(Pubkey::new(host_fee_receiver));
+        for _ in 0..host_fee_receiver_count {
+            let host_fee_receiver =
+                array_ref![config_fees_host_fee_receivers, offset, PUBKEY_BYTES];
+            host_fee_receivers.push(
+                Pubkey::try_from_slice(host_fee_receiver)
+                    .map_err(|_| LendingError::InstructionUnpackError)?,
+            );
         }
         Ok(Self {
             version,
@@ -649,19 +637,19 @@ impl Pack for Reserve {
                     host_fee_percentage: u8::from_le_bytes(*config_fees_host_fee_percentage),
                     host_fee_receivers,
                 },
-                deposit_paused:unpack_bool(deposit_paused)?,
-                borrow_paused:unpack_bool(borrow_paused)?,
-                liquidation_paused:unpack_bool(liquidation_paused)?,
-                deposit_limit:u64::from_le_bytes(*deposit_limit),
+                deposit_paused: unpack_bool(deposit_paused)?,
+                borrow_paused: unpack_bool(borrow_paused)?,
+                liquidation_paused: unpack_bool(liquidation_paused)?,
+                deposit_limit: u64::from_le_bytes(*deposit_limit),
             },
-            bonus: Bonus{
+            bonus: Bonus {
                 un_coll_supply_account: Pubkey::new_from_array(*un_coll_supply_account),
                 l_token_mining_index: unpack_decimal(l_token_mining_index),
                 borrow_mining_index: unpack_decimal(borrow_mining_index),
                 total_mining_speed: u64::from_le_bytes(*total_mining_speed),
-                supply_rate: u64::from_le_bytes(*supply_rate)
+                supply_rate: u64::from_le_bytes(*supply_rate),
             },
-            reentry_lock:unpack_bool(reentry_lock)?,
+            reentry_lock: unpack_bool(reentry_lock)?,
         })
     }
 }

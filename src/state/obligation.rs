@@ -1,7 +1,7 @@
 use super::*;
-use crate::{
-    math::{Decimal},
-};
+use crate::state::last_update::LastUpdate;
+use crate::{error::LendingError, math::Decimal};
+use anchor_lang::AnchorDeserialize;
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
 use solana_program::{
     clock::Slot,
@@ -10,11 +10,7 @@ use solana_program::{
     program_pack::{IsInitialized, Pack, Sealed},
     pubkey::{Pubkey, PUBKEY_BYTES},
 };
-use std::{
-    convert::{TryFrom},
-};
-use crate::state::last_update::LastUpdate;
-
+use std::convert::TryFrom;
 
 /// Max number of collateral and liquidity reserve accounts combined for an obligation
 pub const MAX_OBLIGATION_RESERVES: usize = 10;
@@ -91,8 +87,7 @@ impl IsInitialized for Obligation {
 /// Obligation collateral state
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObligationCollateral {
-
-    pub index:Decimal,
+    pub index: Decimal,
     /// Reserve collateral is deposited to
     pub deposit_reserve: Pubkey,
     /// Amount of collateral deposited
@@ -104,8 +99,7 @@ pub struct ObligationCollateral {
 /// Obligation liquidity state
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObligationLiquidity {
-
-    pub index:Decimal,
+    pub index: Decimal,
     /// Reserve liquidity is borrowed from
     pub borrow_reserve: Pubkey,
     /// Borrow rate used for calculating interest
@@ -116,11 +110,10 @@ pub struct ObligationLiquidity {
     pub market_value: Decimal,
 }
 
-
 const OBLIGATION_COLLATERAL_LEN: usize = 72; // 32 + 8 + 16 + 16
 const OBLIGATION_LIQUIDITY_LEN: usize = 96; // 32 + 16 + 16 + 16
-pub const OBLIGATION_LEN: usize = 1092;// 916; // 1 + 8 + 1 + 32 + 32 + 16 + 16 + 16 + 16 + 1 + 1 + (56 * 1) + (80 * 9)
-                                   // @TODO: break this up by obligation / collateral / liquidity https://git.io/JOCca
+pub const OBLIGATION_LEN: usize = 1092; // 916; // 1 + 8 + 1 + 32 + 32 + 16 + 16 + 16 + 16 + 1 + 1 + (56 * 1) + (80 * 9)
+                                        // @TODO: break this up by obligation / collateral / liquidity https://git.io/JOCca
 impl Pack for Obligation {
     const LEN: usize = OBLIGATION_LEN;
 
@@ -177,16 +170,12 @@ impl Pack for Obligation {
         for collateral in &self.deposits {
             let deposits_flat = array_mut_ref![data_flat, offset, OBLIGATION_COLLATERAL_LEN];
             #[allow(clippy::ptr_offset_with_cast)]
-            let (
-                deposit_reserve,
-                deposited_amount,
-                market_value,
-                index
-            ) = mut_array_refs![deposits_flat, PUBKEY_BYTES, 8, 16,16];
+            let (deposit_reserve, deposited_amount, market_value, index) =
+                mut_array_refs![deposits_flat, PUBKEY_BYTES, 8, 16, 16];
             deposit_reserve.copy_from_slice(collateral.deposit_reserve.as_ref());
             *deposited_amount = collateral.deposited_amount.to_le_bytes();
             pack_decimal(collateral.market_value, market_value);
-            pack_decimal(collateral.index,index);
+            pack_decimal(collateral.index, index);
             offset += OBLIGATION_COLLATERAL_LEN;
         }
 
@@ -194,12 +183,13 @@ impl Pack for Obligation {
         for liquidity in &self.borrows {
             let borrows_flat = array_mut_ref![data_flat, offset, OBLIGATION_LIQUIDITY_LEN];
             #[allow(clippy::ptr_offset_with_cast)]
-            let (borrow_reserve,
+            let (
+                borrow_reserve,
                 cumulative_borrow_rate_wads,
                 borrowed_amount_wads,
                 market_value,
-                index
-            ) = mut_array_refs![borrows_flat, PUBKEY_BYTES, 16, 16, 16,16];
+                index,
+            ) = mut_array_refs![borrows_flat, PUBKEY_BYTES, 16, 16, 16, 16];
             borrow_reserve.copy_from_slice(liquidity.borrow_reserve.as_ref());
             pack_decimal(
                 liquidity.cumulative_borrow_rate_wads,
@@ -207,7 +197,7 @@ impl Pack for Obligation {
             );
             pack_decimal(liquidity.borrowed_amount_wads, borrowed_amount_wads);
             pack_decimal(liquidity.market_value, market_value);
-            pack_decimal(liquidity.index,index);
+            pack_decimal(liquidity.index, index);
             offset += OBLIGATION_LIQUIDITY_LEN;
         }
     }
@@ -262,15 +252,12 @@ impl Pack for Obligation {
         for _ in 0..deposits_len {
             let deposits_flat = array_ref![data_flat, offset, OBLIGATION_COLLATERAL_LEN];
             #[allow(clippy::ptr_offset_with_cast)]
-            let (
-                deposit_reserve,
-                deposited_amount,
-                market_value,
-                index
-            ) = array_refs![deposits_flat, PUBKEY_BYTES, 8, 16, 16];
+            let (deposit_reserve, deposited_amount, market_value, index) =
+                array_refs![deposits_flat, PUBKEY_BYTES, 8, 16, 16];
             deposits.push(ObligationCollateral {
                 index: unpack_decimal(index),
-                deposit_reserve: Pubkey::new(deposit_reserve),
+                deposit_reserve: Pubkey::try_from_slice(deposit_reserve)
+                    .map_err(|_| LendingError::InstructionUnpackError)?,
                 deposited_amount: u64::from_le_bytes(*deposited_amount),
                 market_value: unpack_decimal(market_value),
             });
@@ -280,15 +267,17 @@ impl Pack for Obligation {
         for _ in 0..borrows_len {
             let borrows_flat = array_ref![data_flat, offset, OBLIGATION_LIQUIDITY_LEN];
             #[allow(clippy::ptr_offset_with_cast)]
-            let (borrow_reserve,
+            let (
+                borrow_reserve,
                 cumulative_borrow_rate_wads,
                 borrowed_amount_wads,
                 market_value,
-                index
-            ) = array_refs![borrows_flat, PUBKEY_BYTES, 16, 16, 16,16];
+                index,
+            ) = array_refs![borrows_flat, PUBKEY_BYTES, 16, 16, 16, 16];
             borrows.push(ObligationLiquidity {
-                index:unpack_decimal(index),
-                borrow_reserve: Pubkey::new(borrow_reserve),
+                index: unpack_decimal(index),
+                borrow_reserve: Pubkey::try_from_slice(borrow_reserve)
+                    .map_err(|_| LendingError::InstructionUnpackError)?,
                 cumulative_borrow_rate_wads: unpack_decimal(cumulative_borrow_rate_wads),
                 borrowed_amount_wads: unpack_decimal(borrowed_amount_wads),
                 market_value: unpack_decimal(market_value),
@@ -330,7 +319,7 @@ mod test {
                 cumulative_borrow_rate_wads: Decimal::zero(),
                 ..ObligationLiquidity::default()
             }
-                .accrue_interest(Decimal::one()),
+            .accrue_interest(Decimal::one()),
             Err(LendingError::MathOverflow.into())
         );
 
@@ -339,7 +328,7 @@ mod test {
                 cumulative_borrow_rate_wads: Decimal::from(2u64),
                 ..ObligationLiquidity::default()
             }
-                .accrue_interest(Decimal::one()),
+            .accrue_interest(Decimal::one()),
             Err(LendingError::NegativeInterestRate.into())
         );
 
@@ -349,7 +338,7 @@ mod test {
                 borrowed_amount_wads: Decimal::from(u64::MAX),
                 ..ObligationLiquidity::default()
             }
-                .accrue_interest(Decimal::from(10 * MAX_COMPOUNDED_INTEREST)),
+            .accrue_interest(Decimal::from(10 * MAX_COMPOUNDED_INTEREST)),
             Err(LendingError::MathOverflow.into())
         );
     }
